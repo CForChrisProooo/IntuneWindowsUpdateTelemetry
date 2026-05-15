@@ -69,7 +69,7 @@ The remediation script:
    ```text
    C:\ProgramData\Remediations\WindowsUpdate\UpdateHealth.json
    ```
-3. Outputs summarized telemetry for Intune reporting
+3. Outputs summarized telemetry for Intune reporting allowing the key data to be exported from Intune.
 
 ---
 
