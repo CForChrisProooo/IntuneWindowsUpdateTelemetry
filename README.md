@@ -1,12 +1,12 @@
-# IntuneWindowsUpdateTelemetry
-# Intune Windows Update Telemetry Scripts
+# Intune Windows Update Telemetry
 
-Windows Update telemetry collection and reporting scripts for Microsoft Intune.
+Windows Update telemetry collection and reporting script for Microsoft Intune.
 
-These scripts were built to help investigate Windows devices that are behind on security updates despite remaining active and checking into Intune/Defender. 
+This script was built to help investigate Windows devices that are behind on security updates despite remaining active and checking into Intune and Microsoft Defender.
+
 Native Intune reporting provides compliance visibility, but often lacks the operational telemetry required to determine *why* devices are not patching successfully.
 
-This solution collects local Windows Update telemetry, stores it as structured JSON, and surfaces condensed diagnostics directly into Intune Remediations output for centralized review.
+This solution collects local Windows Update telemetry, stores it as structured JSON, and surfaces condensed diagnostics directly into Intune Remediations output for centralized review and export.
 
 ---
 
@@ -14,7 +14,7 @@ This solution collects local Windows Update telemetry, stores it as structured J
 
 ## Telemetry Collection
 
-The remediation script collects:
+The detection script collects:
 
 - Windows version/build information
 - Last installed hotfix
@@ -31,6 +31,12 @@ The remediation script collects:
 - Network adapter health
 - Device uptime
 - Last boot time
+
+Telemetry is written locally to:
+
+```text
+C:\ProgramData\Remediations\WindowsUpdate\UpdateHealth.json
+```
 
 ---
 
@@ -51,7 +57,6 @@ The remediation script collects:
 
 ```text
 .
-├── remediation.ps1
 ├── detection.ps1
 └── README.md
 ```
@@ -60,32 +65,27 @@ The remediation script collects:
 
 # How It Works
 
-## Remediation Script
-
-The remediation script:
-
-1. Collects local Windows Update telemetry
-2. Writes telemetry to:
-   ```text
-   C:\ProgramData\Remediations\WindowsUpdate\UpdateHealth.json
-   ```
-3. Outputs summarized telemetry for Intune reporting allowing the key data to be exported from Intune.
-
----
-
 ## Detection Script
 
 The detection script:
 
-- Reads the JSON telemetry file
-- Extracts condensed operational diagnostics
-- Outputs compact JSON into Intune Remediations reporting
+1. Collects local Windows Update telemetry
+2. Writes structured telemetry JSON locally
+3. Calculates a likely operational health state
+4. Outputs compact JSON into Intune Remediations reporting
 
-This allows:
-- Intune reporting visibility
-- Defender Advanced Hunting ingestion
-- Export to CSV/Excel
-- Governance reporting
+The script is intentionally detection-only and does not perform remediation or servicing actions on the endpoint.
+
+Example classifications include:
+
+- Pending reboot
+- Windows Update failure events detected
+- Microsoft Update connectivity failure
+- Low disk space
+- Store/runtime update failures only
+- Healthy
+
+The script also separates Microsoft Store/runtime package failures from core Windows Update servicing failures to reduce operational noise.
 
 ---
 
@@ -94,13 +94,18 @@ This allows:
 ```json
 {
   "ComputerName":"PC-001",
+  "HealthState":"Issue",
   "LikelyReason":"Windows Update failure events detected",
+  "Evidence":"EventId=20, Time=2026-05-13 17:44:52, Error=0x800F0905, KB=KB5083769",
   "RecentWUFailures":"2026-05-13 17:44:52 | 0x800F0905 | KB5083769 | 2026-04 Security Update (KB5083769)",
   "PendingWUReboot":true,
   "LastHotfix":"KB5068865",
+  "LastHotfixDate":"2026-05-11 00:00:00",
   "CFreeGB":22.13,
   "WUServiceStatus":"Running",
-  "BITSServiceStatus":"Running"
+  "BITSServiceStatus":"Running",
+  "PrimaryNic":"Ethernet",
+  "PrimaryNicSpeed":"1 Gbps"
 }
 ```
 
@@ -110,8 +115,17 @@ This allows:
 
 Deploy using:
 
-- Microsoft Intune
-- Devices > Scripts and Remediations
+```text
+Microsoft Intune
+→ Devices
+→ Scripts and remediations
+```
+
+Upload the script as a **Detection script**.
+
+A remediation script is optional and not required for telemetry collection.
+
+---
 
 ## Recommended Configuration
 
@@ -120,22 +134,46 @@ Deploy using:
 | Run script in 64-bit PowerShell | Yes |
 | Run this script using logged-on credentials | No |
 | Enforce signature check | No |
-| Frequency | Daily or 6-hour interval |
+| Frequency | Daily or every 6 hours |
 
+---
+
+# Viewing the Data
+
+Detection output can be viewed directly in Intune:
+
+```text
+Devices
+→ Scripts and remediations
+→ [Your Script]
+→ Device status
+```
+
+Enable the following columns:
+
+- Pre-remediation detection output
+- Post-remediation detection output
+
+Telemetry can then be:
+
+- Exported to CSV
+- Imported into Excel
+- Analysed
 ---
 
 # Important Notes
 
 ## Intune Output Limitations
 
-Intune Remediations output is size constrained.  
-The scripts intentionally summarize telemetry into compact fields while storing richer telemetry locally in JSON format.
+Intune Remediations output is size constrained.
+
+The script intentionally summarizes telemetry into compact operational fields while storing richer telemetry locally in JSON format.
 
 ---
 
 ## Native Intune Reporting Limitations
 
-Native Windows Update for Business and Feature Update reports primarily provide:
+Native Windows Update for Business and Feature Update reporting primarily provides:
 
 - compliance visibility
 - deployment state
@@ -150,13 +188,13 @@ They do **not** provide deep endpoint troubleshooting telemetry such as:
 - local servicing corruption evidence
 - operational root-cause diagnostics
 
-These scripts are intended to complement native Intune reporting, not replace it.
+This script is intended to complement native Intune reporting, not replace it.
 
 ---
 
 # Requirements
 
-- Windows 10/11
+- Windows 10 or Windows 11
 - Microsoft Intune
 - PowerShell 5.1+
 - Administrative privileges
@@ -166,7 +204,8 @@ These scripts are intended to complement native Intune reporting, not replace it
 
 # Disclaimer
 
-These scripts are provided as-is with no warranty.  
+This script is provided as-is with no warranty.
+
 Test thoroughly before deploying broadly in production environments.
 
 ---
