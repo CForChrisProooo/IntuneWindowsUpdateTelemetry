@@ -112,7 +112,6 @@ Deploy using:
 
 - Microsoft Intune
 - Devices > Scripts and Remediations
-- Endpoint Analytics Remediations
 
 ## Recommended Configuration
 
