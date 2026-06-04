@@ -8,7 +8,6 @@ $OutputFile = Join-Path $OutputFolder "UpdateHealth.json"
 
 function Convert-DateSafe {
     param($Date)
-
     if ($null -eq $Date) { return $null }
 
     try {
@@ -19,26 +18,24 @@ function Convert-DateSafe {
     }
 }
 
-function Get-PendingReboot {
+function Get-PendingWUReboot {
     $pending = $false
-
-    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
-        $pending = $true
-    }
+    $evidence = @()
 
     if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
         $pending = $true
+        $evidence += "WindowsUpdate\Auto Update\RebootRequired"
     }
 
-    try {
-        $sessionManager = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction Stop
-        if ($sessionManager.PendingFileRenameOperations) {
-            $pending = $true
-        }
+    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
+        $pending = $true
+        $evidence += "Component Based Servicing\RebootPending"
     }
-    catch {}
 
-    return $pending
+    [PSCustomObject]@{
+        Pending  = $pending
+        Evidence = ($evidence -join "; ")
+    }
 }
 
 function Get-LastInstalledUpdate {
@@ -82,16 +79,19 @@ function Get-WUFailureDetails {
     $KB = $null
     $UpdateName = $null
 
-    if ($Message -match 'error (0x[0-9A-Fa-f]+)') {
+    # Language-independent error code detection
+    if ($Message -match '(0x[0-9A-Fa-f]{8})') {
         $ErrorCode = $matches[1]
     }
 
-    if ($Message -match '(KB\d{7})') {
+    # KB format is stable across languages
+    if ($Message -match '(KB\d{7,8})') {
         $KB = $matches[1]
     }
 
-    if ($Message -match 'error .*?: (.*)$') {
-        $UpdateName = $matches[1]
+    # Best-effort update name extraction
+    if ($Message -match ':\s*([^:]+)$') {
+        $UpdateName = $matches[1].Trim()
     }
 
     [PSCustomObject]@{
@@ -109,11 +109,7 @@ function Get-RecentWindowsUpdateFailures {
             LogName      = 'System'
             ProviderName = 'Microsoft-Windows-WindowsUpdateClient'
             Level        = 2
-        } -MaxEvents 100 -ErrorAction Stop |
-        Where-Object {
-            $_.Message -notmatch 'MICROSOFT\.WINDOWSSTORE|WindowsStore|Spotify|DesktopAppInstaller|9WZDNCRFJBMP|9NCBCSZSJRSB|9NBLGGH4NNS1'
-        } |
-        Select-Object -First $Count |
+        } -MaxEvents 200 -ErrorAction Stop |
         ForEach-Object {
             $details = Get-WUFailureDetails $_.Message
 
@@ -125,7 +121,11 @@ function Get-RecentWindowsUpdateFailures {
                 UpdateName  = $details.UpdateName
                 Message     = $_.Message
             }
-        }
+        } |
+        Where-Object {
+            $_.KB -match '^KB\d{7,8}$'
+        } |
+        Select-Object -First $Count
     }
     catch {
         return @()
@@ -140,18 +140,23 @@ function Get-RecentStoreUpdateFailures {
             LogName      = 'System'
             ProviderName = 'Microsoft-Windows-WindowsUpdateClient'
             Level        = 2
-        } -MaxEvents 100 -ErrorAction Stop |
-        Where-Object {
-            $_.Message -match 'MICROSOFT\.WINDOWSSTORE|WindowsStore|Spotify|DesktopAppInstaller|9WZDNCRFJBMP|9NCBCSZSJRSB|9NBLGGH4NNS1'
-        } |
-        Select-Object -First $Count |
+        } -MaxEvents 200 -ErrorAction Stop |
         ForEach-Object {
+            $details = Get-WUFailureDetails $_.Message
+
             [PSCustomObject]@{
                 TimeCreated = Convert-DateSafe $_.TimeCreated
                 EventId     = $_.Id
+                ErrorCode   = $details.ErrorCode
+                KB          = $details.KB
+                UpdateName  = $details.UpdateName
                 Message     = $_.Message
             }
-        }
+        } |
+        Where-Object {
+            $_.KB -notmatch '^KB\d{7,8}$'
+        } |
+        Select-Object -First $Count
     }
     catch {
         return @()
@@ -203,7 +208,7 @@ function Get-LastRebootReason {
             return $null
         }
 
-        return [PSCustomObject]@{
+        [PSCustomObject]@{
             TimeCreated = Convert-DateSafe $event.TimeCreated
             Message     = $event.Message
         }
@@ -245,7 +250,7 @@ function Get-HealthSummary {
     $evidence = "No major issue detected"
     $state = "Healthy"
 
-    if ($Result.CFreeGB -lt 15) {
+    if ($Result.CFreeGB -ne $null -and $Result.CFreeGB -lt 15) {
         $reason = "Low disk space"
         $evidence = "CFreeGB=$($Result.CFreeGB)"
         $state = "Issue"
@@ -256,26 +261,26 @@ function Get-HealthSummary {
         $evidence = "$($failed.Name) $($failed.Host):$($failed.Port) TcpPassed=False"
         $state = "Issue"
     }
-    elseif ($Result.WUServiceStatus -eq "Disabled" -or $Result.BITSServiceStatus -eq "Disabled") {
+    elseif ($Result.WUServiceStartType -eq "Disabled" -or $Result.BITSServiceStartType -eq "Disabled") {
         $reason = "Update service disabled"
-        $evidence = "WUService=$($Result.WUServiceStatus), BITS=$($Result.BITSServiceStatus)"
+        $evidence = "WUStartType=$($Result.WUServiceStartType), BITSStartType=$($Result.BITSServiceStartType)"
         $state = "Issue"
     }
     elseif ($Result.RecentWUFailures.Count -gt 0) {
         $failure = $Result.RecentWUFailures | Select-Object -First 1
-        $reason = "Windows Update failure events detected"
+        $reason = "Windows Update KB failure events detected"
         $evidence = "EventId=$($failure.EventId), Time=$($failure.TimeCreated), Error=$($failure.ErrorCode), KB=$($failure.KB), Update=$($failure.UpdateName)"
         $state = "Issue"
     }
     elseif ($Result.PendingWUReboot -eq $true) {
-        $reason = "Pending reboot"
-        $evidence = "PendingWUReboot=True, LastBootTime=$($Result.LastBootTime)"
-        $state = "Issue"
+        $reason = "Pending Windows Update reboot"
+        $evidence = "PendingWUReboot=True, Evidence=$($Result.PendingWURebootEvidence), LastBootTime=$($Result.LastBootTime)"
+        $state = "Warning"
     }
     elseif ($Result.RecentStoreFailures.Count -gt 0) {
         $failure = $Result.RecentStoreFailures | Select-Object -First 1
-        $reason = "Store app update failures only"
-        $evidence = "EventId=$($failure.EventId), Time=$($failure.TimeCreated), Message=$($failure.Message)"
+        $reason = "Store/app update failures only"
+        $evidence = "EventId=$($failure.EventId), Time=$($failure.TimeCreated), Error=$($failure.ErrorCode), Update=$($failure.UpdateName)"
         $state = "Warning"
     }
     elseif ($Result.RecentInstalledUpdates.Count -eq 0) {
@@ -297,9 +302,7 @@ function Get-HealthSummary {
 }
 
 function Write-DetectionOutput {
-    param(
-        [object]$Data
-    )
+    param([object]$Data)
 
     $primaryNic = $null
 
@@ -316,15 +319,15 @@ function Write-DetectionOutput {
     }
 
     $output = [PSCustomObject]@{
-        ComputerName      = $Data.ComputerName
-        HealthState       = $Data.HealthState
-        LikelyReason      = $Data.LikelyReason
-        Evidence          = $Data.Evidence
+        ComputerName              = $Data.ComputerName
+        HealthState               = $Data.HealthState
+        LikelyReason              = $Data.LikelyReason
+        Evidence                  = $Data.Evidence
 
-        LastRebootTime    = if ($Data.LastRebootReason) { $Data.LastRebootReason.TimeCreated } else { $null }
-        LastRebootReason  = if ($Data.LastRebootReason) { $Data.LastRebootReason.Message } else { $null }
+        LastRebootTime            = if ($Data.LastRebootReason) { $Data.LastRebootReason.TimeCreated } else { $null }
+        LastRebootReason          = if ($Data.LastRebootReason) { $Data.LastRebootReason.Message } else { $null }
 
-        RecentWUFailures  = if ($RecentFailures.Count -gt 0) {
+        RecentWUFailures          = if ($RecentFailures.Count -gt 0) {
             ($RecentFailures | ForEach-Object {
                 "$($_.TimeCreated) | $($_.ErrorCode) | $($_.KB) | $($_.UpdateName)"
             }) -join " || "
@@ -332,18 +335,22 @@ function Write-DetectionOutput {
             $null
         }
 
-        PendingWUReboot   = $Data.PendingWUReboot
-        LastHotfix        = $Data.LastInstalledHotfix
-        LastHotfixDate    = $Data.LastHotfixDate
-        CFreeGB           = $Data.CFreeGB
+        PendingWUReboot           = $Data.PendingWUReboot
+        PendingWURebootEvidence   = $Data.PendingWURebootEvidence
 
-        WUServiceStatus   = $Data.WUServiceStatus
-        BITSServiceStatus = $Data.BITSServiceStatus
+        LastHotfix                = $Data.LastInstalledHotfix
+        LastHotfixDate            = $Data.LastHotfixDate
+        CFreeGB                   = $Data.CFreeGB
 
-        PrimaryNic        = if ($primaryNic) { $primaryNic.Name } else { $null }
-        PrimaryNicSpeed   = if ($primaryNic) { $primaryNic.LinkSpeed } else { $null }
+        WUServiceStatus           = $Data.WUServiceStatus
+        WUServiceStartType        = $Data.WUServiceStartType
+        BITSServiceStatus         = $Data.BITSServiceStatus
+        BITSServiceStartType      = $Data.BITSServiceStartType
 
-        CollectedAt       = $Data.CollectedAt
+        PrimaryNic                = if ($primaryNic) { $primaryNic.Name } else { $null }
+        PrimaryNicSpeed           = if ($primaryNic) { $primaryNic.LinkSpeed } else { $null }
+
+        CollectedAt               = $Data.CollectedAt
     }
 
     $output | ConvertTo-Json -Compress
@@ -393,7 +400,9 @@ $RecentInstalledUpdates = @(Get-RecentInstalledUpdates -Count 10)
 $RecentWUFailures = @(Get-RecentWindowsUpdateFailures -Count 10)
 $RecentStoreFailures = @(Get-RecentStoreUpdateFailures -Count 10)
 
-$PendingReboot = Get-PendingReboot
+$PendingRebootInfo = Get-PendingWUReboot
+$PendingReboot = $PendingRebootInfo.Pending
+$PendingRebootEvidence = $PendingRebootInfo.Evidence
 
 $WUService = Get-Service wuauserv -ErrorAction SilentlyContinue
 $BITSService = Get-Service BITS -ErrorAction SilentlyContinue
@@ -405,37 +414,38 @@ $NetworkAdapters = @(Get-NetworkAdapterHealth)
 $LastRebootReason = Get-LastRebootReason
 
 $Result = [PSCustomObject]@{
-    ComputerName            = $ComputerName
-    CollectedAt             = Convert-DateSafe $CollectedAt
+    ComputerName                = $ComputerName
+    CollectedAt                 = Convert-DateSafe $CollectedAt
 
-    OSName                  = if ($OS) { $OS.Caption } else { $null }
-    OSVersion               = if ($OS) { $OS.Version } else { $null }
-    BuildNumber             = if ($OS) { $OS.BuildNumber } else { $null }
-    LastBootTime            = Convert-DateSafe $BootTime
-    UptimeDays              = $UptimeDays
-    LastRebootReason        = $LastRebootReason
+    OSName                      = if ($OS) { $OS.Caption } else { $null }
+    OSVersion                   = if ($OS) { $OS.Version } else { $null }
+    BuildNumber                 = if ($OS) { $OS.BuildNumber } else { $null }
+    LastBootTime                = Convert-DateSafe $BootTime
+    UptimeDays                  = $UptimeDays
+    LastRebootReason            = $LastRebootReason
 
-    LastInstalledHotfix     = if ($LastHotfix) { $LastHotfix.HotFixID } else { $null }
-    LastHotfixDate          = if ($LastHotfix) { Convert-DateSafe $LastHotfix.InstalledOn } else { $null }
-    RecentInstalledUpdates  = $RecentInstalledUpdates
+    LastInstalledHotfix         = if ($LastHotfix) { $LastHotfix.HotFixID } else { $null }
+    LastHotfixDate              = if ($LastHotfix) { Convert-DateSafe $LastHotfix.InstalledOn } else { $null }
+    RecentInstalledUpdates      = $RecentInstalledUpdates
 
-    RecentWUFailures        = $RecentWUFailures
-    RecentStoreFailures     = $RecentStoreFailures
+    RecentWUFailures            = $RecentWUFailures
+    RecentStoreFailures         = $RecentStoreFailures
 
-    PendingWUReboot         = $PendingReboot
+    PendingWUReboot             = $PendingReboot
+    PendingWURebootEvidence     = $PendingRebootEvidence
 
-    WUServiceStatus         = if ($WUService) { $WUService.Status.ToString() } else { $null }
-    WUServiceStartType      = if ($WUService) { $WUService.StartType.ToString() } else { $null }
-    BITSServiceStatus       = if ($BITSService) { $BITSService.Status.ToString() } else { $null }
-    BITSServiceStartType    = if ($BITSService) { $BITSService.StartType.ToString() } else { $null }
+    WUServiceStatus             = if ($WUService) { $WUService.Status.ToString() } else { $null }
+    WUServiceStartType          = if ($WUService) { $WUService.StartType.ToString() } else { $null }
+    BITSServiceStatus           = if ($BITSService) { $BITSService.Status.ToString() } else { $null }
+    BITSServiceStartType        = if ($BITSService) { $BITSService.StartType.ToString() } else { $null }
 
-    WSUSPolicyPresent       = $WSUSPolicyPresent
+    WSUSPolicyPresent           = $WSUSPolicyPresent
 
-    NetworkHealth           = $NetworkHealth
-    NetworkAdapters         = $NetworkAdapters
+    NetworkHealth               = $NetworkHealth
+    NetworkAdapters             = $NetworkAdapters
 
-    CFreeGB                 = $FreeSpaceGB
-    CSizeGB                 = $TotalSpaceGB
+    CFreeGB                     = $FreeSpaceGB
+    CSizeGB                     = $TotalSpaceGB
 }
 
 $Health = Get-HealthSummary -Result $Result
@@ -460,6 +470,8 @@ catch {
 
 Write-DetectionOutput -Data $Result
 
+# Intune detection should only fail for real issues.
+# Warnings are reported in output but exit 0.
 if ($Result.HealthState -eq "Issue") {
     exit 1
 }
